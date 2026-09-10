@@ -95,22 +95,6 @@ module top (
     end
 
 
-    always_comb begin
-
-        status_byte = {
-            1'b1,
-            vehicle_red,
-            vehicle_yellow,
-            vehicle_green,
-            ped_walk,
-            request_pending,
-            sensor_valid,
-            vehicle_present
-        };
-
-    end
-
-
     spi_slave u_spi_slave (
         .clk         (CLK100MHZ),
         .rst         (rst),
@@ -145,8 +129,8 @@ module top (
 
 
     sensor_input #(
-        .ENTER_THRESHOLD_MM (250),
-        .EXIT_THRESHOLD_MM  (350),
+        .ENTER_THRESHOLD_MM (350),
+        .EXIT_THRESHOLD_MM  (400),
         .STALE_CYCLES       (50_000_000)
     ) u_sensor_input (
         .clk               (CLK100MHZ),
@@ -171,6 +155,7 @@ module top (
         .YELLOW_CYCLES      (2 * CLK_FREQ_HZ),
         .ALL_STOP_CYCLES    (1 * CLK_FREQ_HZ),
         .WALK_CYCLES        (5 * CLK_FREQ_HZ),
+        .WALK_EXTENSION_CYCLES (3 * CLK_FREQ_HZ),
         .CLEAR_CYCLES       (2 * CLK_FREQ_HZ)
     ) u_crossing_fsm (
         .clk             (CLK100MHZ),

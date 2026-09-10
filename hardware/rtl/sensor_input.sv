@@ -21,8 +21,9 @@
 
 
 module sensor_input #(
-    parameter int unsigned ENTER_THRESHOLD_MM = 250,
-    parameter int unsigned EXIT_THRESHOLD_MM  = 350,
+    // Margin around a 300 mm target, with hysteresis to avoid chatter.
+    parameter int unsigned ENTER_THRESHOLD_MM = 350,
+    parameter int unsigned EXIT_THRESHOLD_MM  = 400,
     parameter int unsigned STALE_CYCLES       = 50_000_000
 )(
     input  logic        clk,
@@ -65,14 +66,14 @@ module sensor_input #(
                     if (
                         !vehicle_present &&
                         distance_mm != 16'd0 &&
-                        distance_mm <= ENTER_THRESHOLD_MM
+                        {16'd0, distance_mm} <= ENTER_THRESHOLD_MM
                     ) begin
                         vehicle_present <= 1'b1;
                     end
 
                     else if (
                         vehicle_present &&
-                        distance_mm >= EXIT_THRESHOLD_MM
+                        {16'd0, distance_mm} >= EXIT_THRESHOLD_MM
                     ) begin
                         vehicle_present <= 1'b0;
                     end

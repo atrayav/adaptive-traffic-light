@@ -34,6 +34,7 @@ module crossing_fsm #(
     parameter int unsigned YELLOW_CYCLES      = 20,
     parameter int unsigned ALL_STOP_CYCLES    = 10,
     parameter int unsigned WALK_CYCLES        = 40,
+    parameter int unsigned WALK_EXTENSION_CYCLES = 30,
     parameter int unsigned CLEAR_CYCLES       = 20
 
 )(
@@ -45,7 +46,7 @@ module crossing_fsm #(
     // 1 = vehicle/shoe currently detected
     input  logic vehicle_present,
 
-    // Pulse/high level indicating pedestrian button press
+    // One-cycle pulse for each fresh pedestrian button press (from sensor_input).
     input  logic ped_request,
 
     // 1 = most recent sensor/packet information is trustworthy
@@ -90,6 +91,32 @@ module crossing_fsm #(
 
     logic [31:0] phase_counter;
     logic [31:0] request_wait_counter;
+    logic [31:0] walk_remaining;
+    logic extend_walk;
+
+    // In either mode, a fresh press can extend WALK only with a valid clear road.
+    assign extend_walk = (state == PED_WALK) && ped_request &&
+                         sensor_valid && !vehicle_present;
+
+    // Count down separately so extensions do not affect other phase timings.
+    // Consume the current cycle even when adding time. Saturate on overflow.
+    always_ff @(posedge clk) begin
+        if (rst || state != PED_WALK) begin
+            walk_remaining <= WALK_CYCLES;
+        end
+        else if (extend_walk) begin
+            if ((walk_remaining - 32'd1) >
+                (32'hffff_ffff - WALK_EXTENSION_CYCLES)) begin
+                walk_remaining <= 32'hffff_ffff;
+            end
+            else begin
+                walk_remaining <= walk_remaining - 32'd1 + WALK_EXTENSION_CYCLES;
+            end
+        end
+        else if (walk_remaining != 0) begin
+            walk_remaining <= walk_remaining - 32'd1;
+        end
+    end
 
 
     // TIMER DONE SIGNALS
@@ -123,10 +150,10 @@ module crossing_fsm #(
     // A short button press is remembered until the request
     // is actually served.
     //
-    // We only accept new requests during VEH_GREEN.
+    // We only queue a new crossing during VEH_GREEN.
     //
-    // This prevents repeated presses during WALK/CLEAR from
-    // accidentally creating another immediate crossing.
+    // WALK presses extend the current phase separately; they never queue
+    // another crossing. CLEAR presses are ignored.
     
     always_ff @(posedge clk) begin
 
@@ -245,7 +272,7 @@ module crossing_fsm #(
             (phase_counter >= ALL_STOP_CYCLES - 1);
 
         walk_done =
-            (phase_counter >= WALK_CYCLES - 1);
+            (walk_remaining <= 1);
 
         clear_done =
             (phase_counter >= CLEAR_CYCLES - 1);
@@ -354,7 +381,8 @@ module crossing_fsm #(
 
             PED_WALK: begin
 
-                if (walk_done) begin
+                // A valid extension wins even on the final WALK cycle.
+                if (walk_done && !extend_walk) begin
 
                     next_state = PED_CLEAR;
 

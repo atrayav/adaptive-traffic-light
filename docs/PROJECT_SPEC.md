@@ -4,7 +4,7 @@
 
 Prepared September 10, 2026, from the repository source and the team's confirmation that the distance sensor is an **HC-SR04 ultrasonic sensor**. “Ultrasonic” describes the sound frequency; it is the appropriate term for this sensor.
 
-This document describes the implemented design, identifies incomplete work, and provides a plan for producing the final presentation. Source inspection establishes what the code specifies, not whether it has passed compilation, simulation, or physical testing. No new hardware or simulation results were generated for this document.
+This document describes the implemented design, identifies incomplete work, and provides a plan for producing the final presentation. Source inspection establishes what the code specifies, not whether it has passed compilation, simulation, or physical testing. Update: the original FSM tests and the detection/WALK-extension regressions pass with Verilator 5.052, and the complete FPGA top passes lint. Physical testing and FPGA synthesis/implementation remain unverified.
 
 ## 1. Executive summary
 
@@ -155,15 +155,15 @@ Sampling is scheduled every 60 ms, approximately 16.7 measurements per second. T
 
 | Previous condition | New valid distance | Result |
 |---|---|---|
-| Clear | Nonzero and ≤250 mm | Vehicle present |
-| Present | ≥350 mm | Clear |
-| Either | Between 250 and 350 mm | Preserve previous state |
+| Clear | Nonzero and ≤350 mm | Vehicle present |
+| Present | ≥400 mm | Clear |
+| Either | Between 350 and 400 mm | Preserve previous state |
 
 Using different entry and exit thresholds is hysteresis: it reduces repeated toggling near a single boundary. Thresholds represent tabletop object detection and have not been shown to be calibrated to actual traffic.
 
 A checksum-valid packet resets the stale counter. An invalid sensor flag immediately clears sensor validity. No fresh packet for approximately 500 ms also clears validity. Invalid or stale data preserves the last presence bit, so consumers must inspect validity as well as presence.
 
-For a “clear road” demo, use a reliable background target farther than 350 mm but within the sensor's usable range. Removing every reflector may produce a timeout, which means invalid data rather than a valid clear road.
+For a “clear road” demo, use a reliable background target farther than 400 mm but within the sensor's usable range. Removing every reflector may produce a timeout, which means invalid data rather than a valid clear road.
 
 ## 6. SPI protocol
 
@@ -214,7 +214,8 @@ stateDiagram-v2
     VEH_GREEN --> VEH_YELLOW: Pending request and mode-specific conditions
     VEH_YELLOW --> ALL_STOP: 2 seconds
     ALL_STOP --> PED_WALK: 1 second
-    PED_WALK --> PED_CLEAR: 5 seconds
+    PED_WALK --> PED_WALK: Fresh press, valid clear road / add 3 seconds
+    PED_WALK --> PED_CLEAR: Walk timer expires
     PED_CLEAR --> VEH_GREEN: 2 seconds
 ```
 
@@ -223,7 +224,7 @@ stateDiagram-v2
 | `VEH_GREEN` (0) | Green | Off | Depends on mode and request |
 | `VEH_YELLOW` (1) | Yellow | Off | 2 seconds |
 | `ALL_STOP` (2) | Red | Off | 1 second |
-| `PED_WALK` (3) | Red | On | 5 seconds |
+| `PED_WALK` (3) | Red | On | Initially 5 seconds; each qualifying press adds 3 seconds |
 | `PED_CLEAR` (4) | Red | Off | 2 seconds |
 
 The walk indicator does not flash during clearance. Green continues indefinitely without an accepted request. Reset selects vehicle green and clears the pending request.
@@ -247,7 +248,7 @@ New requests still depend on valid sensor data in the input logic and request la
 
 ### Request semantics
 
-The input module creates a request pulse on a sampled rising edge of the button. The FSM accepts requests only during green and while sensor data is valid. It clears the pending request when entering walk. Presses during yellow, all-stop, walk, or clearance are not queued for another cycle. A held button is not intended to generate repeated crossings; there is no dedicated mechanical debounce filter.
+The input module creates a request pulse on a sampled rising edge of the button. The FSM accepts requests only during green and while sensor data is valid. It clears the pending request when entering walk. Presses during yellow, all-stop, walk, or clearance are not queued for another cycle. During walk, each fresh press adds 3 seconds to the remaining time if sensor data is valid and vehicle presence is clear, in either mode. A press on the final walk cycle takes priority over expiry. Early presses also add time; separate repeated presses can extend repeatedly. A vehicle arrival or invalid reading blocks further extensions but does not revoke time already granted. The timer saturates at its 32-bit maximum instead of wrapping. A held button is not intended to generate repeated crossings; there is no dedicated mechanical debounce filter.
 
 ### Timing examples for slides
 
@@ -306,7 +307,7 @@ Before building the proximity test, isolate its sketch from the duplicate contro
 1. Create or restore the project for the exact Arty part in the team's FPGA toolchain.
 2. Add all five `hardware/rtl/*.sv` sources and select `top` for synthesis.
 3. Add the provided XDC and verify the physical connector mapping.
-4. Resolve the duplicate `status_byte` driver described below.
+4. Keep the single `status_byte` assignment and check the complete design for lint errors.
 5. Add `hardware/sim/tb_crossing.sv` as a simulation source and select `tb_crossing` for behavioral simulation.
 6. Run simulation, synthesis, implementation, timing checks, and bitstream generation.
 7. Save reports, program the board, reset the controller, and verify both mode settings.
@@ -317,7 +318,7 @@ The repository does not include a reproducible FPGA project script, committed bi
 
 | Finding | Consequence | Recommended action before claiming completion |
 |---|---|---|
-| `top.sv` drives `status_byte` using both `assign` and `always_comb` | Conflicting ownership violates intended single-driver combinational structure and may block tools | Keep one assignment and rerun the FPGA flow |
+| Resolved: duplicate `status_byte` assignment | Status now has one continuous driver | Full-top Verilator lint passes; FPGA implementation still needs verification |
 | Duplicate Arduino controller files in the sensor-test folder | Duplicate entry points and definitions prevent a clean sensor-test build | Retain one implementation per sketch folder |
 | Root README references APDS9960 | Setup instructions misrepresent current sensor | Update the README to the HC-SR04 architecture |
 | Invalid sensor data blocks new requests and adaptive departure from green | No unconditional pedestrian wait guarantee | Demonstrate current behavior and decide on an explicit fallback policy |
@@ -337,19 +338,21 @@ This is an educational prototype. Its modeled signal separation does not establi
 
 The FSM testbench contains reset, request latching, adaptive gap service, continuous-traffic maximum wait, fixed timing, and invalid-sensor scenarios. It also checks each clock cycle that vehicle green and pedestrian walk are not active together. It exercises the FSM directly, with reduced timer parameters; it does not exercise SPI, packet parsing, distance hysteresis, the physical HC-SR04, or Arduino LED behavior.
 
-No saved pass log was found in the repository. A testbench's final “passed” message in source is not a test result.
+The original FSM testbench and `hardware/sim/tb_updates.sv` were executed successfully with Verilator 5.052 after the detection and extension update. The latter covers threshold boundaries, hysteresis, button edges, stale data, exact extension durations, final-cycle presses, repeated extensions, both modes, blocked extensions, reset, and output separation. These simulations do not establish physical hardware behavior. Reproduce them with `bash hardware/sim/run_tests.sh`.
 
 ### Acceptance matrix
 
 | Test | Procedure | Expected evidence |
 |---|---|---|
 | Sensor acquisition | Measure targets at several known distances | CSV with valid readings, ruler distance, error and variability |
-| Presence hysteresis | Move inward through 250 mm, then outward through 350 mm | Logged presence switches at the respective boundaries |
+| Presence hysteresis | Move inward through 350 mm, then outward through 400 mm | Logged presence switches at the respective boundaries |
 | Traffic gap | Request shortly after reset with valid clear reading | Minimum green followed by full crossing sequence |
 | Continuous presence | Hold target near sensor and request | Yellow near maximum request wait, then walk |
 | Fixed comparison | Repeat identical request timing in fixed mode | Green ends according to 8-second phase age |
 | Pending request | Briefly press during green | Request remains pending until walk entry |
-| Ignored phase request | Press during walk/clearance, then release | No automatic queued crossing on return to green |
+| Walk extension | Press near WALK expiry with valid clear readings | Three additional seconds per fresh press; no additional crossing queued |
+| Blocked extension | Press during WALK with vehicle present or invalid sensor data | Original WALK expiry unchanged |
+| Ignored clearance request | Press during clearance, then release | No automatic queued crossing on return to green |
 | Sensor timeout | Prevent valid echo while continuing operation | Validity clears and documented service behavior occurs |
 | Stale packets | Stop packet delivery in controlled test | FPGA validity clears at approximately 500 ms |
 | Bad packet | Inject wrong magic/checksum in simulation | Payload not accepted |
@@ -424,7 +427,7 @@ Suggested structure: 12 slides for roughly 10–12 minutes, plus questions. Adju
 | Why an FPGA? | To implement and study synchronous state control and hardware/software integration; this small controller could also run on a microcontroller |
 | Is it AI? | No. Current behavior is rule-based; training and policy files are placeholders |
 | How does it detect a car? | It detects an object within a distance region; it does not classify cars |
-| What prevents flickering presence? | Separate entry/exit thresholds retain the previous state between 250 and 350 mm |
+| What prevents flickering presence? | Separate entry/exit thresholds retain the previous state between 350 and 400 mm |
 | Is the maximum wait always 10 seconds? | No. That threshold applies to pending requests leaving green with valid data; walk starts later and invalid data can block service |
 | What if the sensor fails? | Validity clears; current code blocks new requests and adaptive service rather than automatically falling back |
 | Does fixed mode always wait eight seconds after a press? | No. Eight seconds is the age of the green phase |
@@ -448,7 +451,8 @@ Suggested structure: 12 slides for roughly 10–12 minutes, plus questions. Adju
 2. Select adaptive mode, reset, and press shortly after reset with a clear reading. Show minimum green, yellow, all-stop, walk, and clearance.
 3. Repeat in fixed mode with the same request timing. Compare the observed delay.
 4. Return to adaptive mode, reset, hold the near target, and press. Explain the maximum request-wait threshold and subsequent clearance before walk.
-5. If time permits, show an invalid reading and explain the implemented behavior without claiming a fallback that does not exist.
+5. During WALK with a valid clear reading, release and press the button near expiry. Show the extra 3 seconds. Repeat with a detected target to show that extensions are blocked.
+6. If time permits, show an invalid reading and explain the implemented behavior without claiming a fallback that does not exist.
 
 Allow roughly a minute or more for multiple full cycles. Use the backup recording if live communication is unreliable; distinguish recorded evidence from a live run.
 
@@ -458,10 +462,11 @@ Allow roughly a minute or more for multiple full cycles. Use the backup recordin
 - [ ] Confirm exact Arduino and Arty board variants.
 - [ ] Document the actual HC-SR04 supply and echo voltage interface.
 - [ ] Record final wiring, resistor values, and installed walk indicator.
-- [ ] Resolve duplicate `status_byte` assignments and duplicate sensor-test sources.
+- [x] Resolve duplicate `status_byte` assignments.
+- [ ] Resolve duplicate sensor-test sources.
 - [ ] Update obsolete README instructions.
 - [ ] Compile firmware and FPGA design; save tool versions and reports.
-- [ ] Run the existing FSM tests and record outcomes.
+- [x] Run the existing FSM tests and new detection/extension regressions (Verilator 5.052: pass).
 - [ ] Perform sensor, packet, SPI, and physical integration tests.
 - [ ] Decide whether failure handling and counter saturation are required for the final submission; document the final behavior.
 - [ ] Collect repeated matched adaptive/fixed trials and raw data.
@@ -479,4 +484,4 @@ External references used for component and electrical details:
 2. [Arduino Nano 33 BLE Sense Rev2 datasheet](https://docs-content.arduino.cc/resources/datasheets/ABX00069-datasheet.pdf).
 3. [Arduino Nano 33 BLE Sense Rev2 full pinout](https://docs.arduino.cc/resources/pinouts/ABX00069-full-pinout.pdf).
 
-Physical wiring, achieved sensor accuracy, observed timing, successful compilation, FPGA resource utilization, and measured benefits remain matters for team evidence. This specification must be updated if the implementation changes before the final presentation.
+Physical wiring, achieved sensor accuracy, observed timing, successful FPGA synthesis/implementation, FPGA resource utilization, and measured benefits remain matters for team evidence. This specification must be updated if the implementation changes before the final presentation.
