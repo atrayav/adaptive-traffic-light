@@ -1,22 +1,23 @@
-#include <Arduino_APDS9960.h>
+#include <Arduino.h>
 
-const unsigned long SAMPLE_INTERVAL_MS = 100;
+constexpr uint8_t TRIG_PIN = 2;
+constexpr uint8_t ECHO_PIN = 3;
+constexpr unsigned long ECHO_TIMEOUT_US = 30000;
+constexpr unsigned long SAMPLE_INTERVAL_MS = 60;
+
 unsigned long lastSampleMs = 0;
 
 void setup() {
   Serial.begin(115200);
+  pinMode(TRIG_PIN, OUTPUT);
+  digitalWrite(TRIG_PIN, LOW);
+  pinMode(ECHO_PIN, INPUT);
+
   while (!Serial) {
     ;
   }
 
-  if (!APDS.begin()) {
-    Serial.println("ERROR: APDS9960 initialization failed. Check board and Arduino_APDS9960 library.");
-    while (true) {
-      delay(1000);
-    }
-  }
-
-  Serial.println("time_ms,proximity");
+  Serial.println("time_ms,distance_mm,valid");
 }
 
 void loop() {
@@ -28,11 +29,22 @@ void loop() {
 
   lastSampleMs = now;
 
-  if (APDS.proximityAvailable()) {
-    const int proximity = APDS.readProximity();
+  // Send a 10 us trigger pulse.
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
 
-    Serial.print(now);
-    Serial.print(',');
-    Serial.println(proximity);
-  }
+  const unsigned long duration = pulseIn(ECHO_PIN, HIGH, ECHO_TIMEOUT_US);
+
+  // Convert round-trip time to distance in mm.
+  const uint32_t distanceMm = (duration * 343UL) / 2000UL;
+  const bool valid = duration != 0 && distanceMm > 0 && distanceMm <= 65535;
+
+  Serial.print(now);
+  Serial.print(',');
+  Serial.print(valid ? distanceMm : 0);
+  Serial.print(',');
+  Serial.println(valid ? 1 : 0);
 }
